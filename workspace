@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+
+# workspace — launch and arrange apps from a JSON config
+# Usage: workspace <name>
+# Configs live in ~/.workspaces/<name>.json
+
+set -euo pipefail
+
+WORKSPACES_DIR="$HOME/.workspaces"
+SHORTCUT_PLIST="$HOME/Library/LaunchAgents/com.workspace.shortcuts.plist"
+
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<EOF
+workspace — arrange apps on screen from a JSON config
+
+Usage:
+  workspace <name>            Launch workspace by name
+  workspace list              List all saved workspaces
+  workspace edit <name>       Open config in \$EDITOR (creates if missing)
+  workspace shortcuts         Print all registered shortcuts
+  workspace help              Show this message
+
+Config files live in: ~/.workspaces/<name>.json
+
+Example JSON:
+  {
+    "name": "work",
+    "shortcut": "ctrl+shift+1",
+    "apps": [
+      { "app": "Slack",   "zone": "right-half" },
+      { "app": "Safari",  "zone": "left-half"  },
+      { "app": "Terminal","zone": "bottom-right-quarter" }
+    ]
+  }
+
+Available zones:
+  full                   left-half          right-half
+  top-half               bottom-half
+  top-left-quarter       top-right-quarter
+  bottom-left-quarter    bottom-right-quarter
+  center-large           center-small
+EOF
+}
+
+die() { echo "❌  $*" >&2; exit 1; }
+info() { echo "→  $*"; }
+
+require_jq() {
+  command -v jq &>/dev/null || die "jq is required. Install with: brew install jq"
+}
+
+# ── zone → {x, y, w, h} as fractions of screen ────────────────────────────────
+# Returns four space-separated values: x_frac y_frac w_frac h_frac
+
+zone_fracs() {
+  case "$1" in
+    full)                   echo "0    0    1    1"    ;;
+    left-half)              echo "0    0    0.5  1"    ;;
+    right-half)             echo "0.5  0    0.5  1"    ;;
+    top-half)               echo "0    0    1    0.5"  ;;
+    bottom-half)            echo "0    0.5  1    0.5"  ;;
+    top-left-quarter)       echo "0    0    0.5  0.5"  ;;
+    top-right-quarter)      echo "0.5  0    0.5  0.5"  ;;
+    bottom-left-quarter)    echo "0    0.5  0.5  0.5"  ;;
+    bottom-right-quarter)   echo "0.5  0.5  0.5  0.5"  ;;
+    center-large)           echo "0.1  0.1  0.8  0.8"  ;;
+    center-small)           echo "0.2  0.2  0.6  0.6"  ;;
+    *) die "Unknown zone '$1'. Run 'workspace help' for valid zones." ;;
+  esac
+}
+
+# ── launch + position one app ─────────────────────────────────────────────────
+
+position_app() {
+  local app="$1"
+  local zone="$2"
+
+  read -r xf yf wf hf <<< "$(zone_fracs "$zone")"
+
+  osascript <<APPLESCRIPT
+-- get screen dimensions
+tell application "Finder"
+  set screenBounds to bounds of window of desktop
+  set sw to item 3 of screenBounds
+  set sh to item 4 of screenBounds
+end tell
+
+-- compute pixel values
+set px to (sw * $xf) as integer
+set py to (sh * $yf) as integer
+set pw to (sw * $wf) as integer
+set ph to (sh * $hf) as integer
+
+-- launch the app
+tell application "$app" to activate
+
+-- wait for window
+delay 1.2
+
+-- position it
+tell application "System Events"
+  tell process "$app"
+    if (count of windows) > 0 then
+      tell front window
+        set position to {px, py}
+        set size to {pw, ph}
+      end tell
+    end if
+  end tell
+end tell
+APPLESCRIPT
+}
+
+# ── subcommands ────────────────────────────────────────────────────────────────
+
+cmd_list() {
+  mkdir -p "$WORKSPACES_DIR"
+  local files=("$WORKSPACES_DIR"/*.json)
+  if [[ ! -e "${files[0]}" ]]; then
+    echo "No workspaces yet. Create one with: workspace edit <name>"
+    return
+  fi
+  echo "Saved workspaces:"
+  for f in "${files[@]}"; do
+    local name
+    name=$(basename "$f" .json)
+    local shortcut=""
+    if command -v jq &>/dev/null; then
+      shortcut=$(jq -r '.shortcut // ""' "$f")
+    fi
+    if [[ -n "$shortcut" ]]; then
+      printf "  %-20s  (%s)\n" "$name" "$shortcut"
+    else
+      printf "  %s\n" "$name"
+    fi
+  done
+}
+
+cmd_edit() {
+  local name="$1"
+  mkdir -p "$WORKSPACES_DIR"
+  local config="$WORKSPACES_DIR/$name.json"
+  if [[ ! -f "$config" ]]; then
+    cat > "$config" <<EOF
+{
+  "name": "$name",
+  "shortcut": "ctrl+shift+1",
+  "apps": [
+    { "app": "Safari",   "zone": "left-half"  },
+    { "app": "Terminal", "zone": "right-half" }
+  ]
+}
+EOF
+    info "Created new config: $config"
+  fi
+  "${EDITOR:-nano}" "$config"
+}
+
+cmd_shortcuts() {
+  require_jq
+  mkdir -p "$WORKSPACES_DIR"
+  local found=false
+  for f in "$WORKSPACES_DIR"/*.json; do
+    [[ -e "$f" ]] || continue
+    local sc
+    sc=$(jq -r '.shortcut // ""' "$f")
+    if [[ -n "$sc" ]]; then
+      printf "  %-15s  %s\n" "$(basename "$f" .json)" "$sc"
+      found=true
+    fi
+  done
+  $found || echo "No shortcuts registered in any workspace."
+  echo ""
+  echo "Note: shortcuts in the JSON are for reference — wire them up via"
+  echo "System Settings → Keyboard → Shortcuts → App Shortcuts, or use"
+  echo "a tool like Raycast / BetterTouchTool to run: workspace <name>"
+}
+
+cmd_launch() {
+  require_jq
+  local name="$1"
+  local config="$WORKSPACES_DIR/$name.json"
+  [[ -f "$config" ]] || die "No workspace named '$name'. File not found: $config"
+
+  # Check accessibility permission
+  osascript -e 'tell application "System Events" to get name of first process' &>/dev/null || {
+    echo "⚠️  Accessibility access needed."
+    echo "   Go to: System Settings → Privacy & Security → Accessibility"
+    echo "   Add your terminal app (Terminal / iTerm2 / etc.)"
+    exit 1
+  }
+
+  local total
+  total=$(jq '.apps | length' "$config")
+  local ws_name
+  ws_name=$(jq -r '.name' "$config")
+
+  echo "🚀  Launching workspace: $ws_name ($total apps)"
+
+  for i in $(seq 0 $((total - 1))); do
+    local app zone
+    app=$(jq -r ".apps[$i].app" "$config")
+    zone=$(jq -r ".apps[$i].zone" "$config")
+    info "[$((i+1))/$total] $app → $zone"
+    position_app "$app" "$zone"
+  done
+
+  echo "✅  Done."
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+mkdir -p "$WORKSPACES_DIR"
+
+case "${1:-}" in
+  help|--help|-h) usage ;;
+  list)           cmd_list ;;
+  edit)           [[ -n "${2:-}" ]] || die "Usage: workspace edit <name>"; cmd_edit "$2" ;;
+  shortcuts)      cmd_shortcuts ;;
+  "")             usage ;;
+  *)              cmd_launch "$1" ;;
+esac

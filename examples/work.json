@@ -1,0 +1,8 @@
+{
+  "name": "work",
+  "shortcut": "ctrl+shift+1",
+  "apps": [
+    { "app": "Slack",   "zone": "right-half" },
+    { "app": "Safari",  "zone": "left-half"  }
+  ]
+}
