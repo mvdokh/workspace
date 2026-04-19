@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
 # workspace — launch and arrange apps from a JSON config
-# Usage: workspace <n>
-# Configs live in ~/.workspaces/<n>.json
+# Usage: workspace <name>
+# Configs live in ~/.workspaces/<name>.json
+# Dependencies: none (uses built-in osascript/JXA for JSON parsing + window management)
 
 set -euo pipefail
 
@@ -16,26 +17,26 @@ usage() {
 workspace — arrange apps on screen from a JSON config
 
 Usage:
-  workspace <n>                  Launch workspace by name
+  workspace <name>                  Launch workspace by name
   workspace list                    List all saved workspaces
-  workspace edit <n>             Open config in \$EDITOR (creates if missing)
-  workspace schedule <n> <time>  Auto-launch at a time, e.g. "9:00"
-  workspace unschedule <n>       Remove a scheduled launch
+  workspace edit <name>             Open config in \$EDITOR (creates if missing)
+  workspace schedule <name> <time>  Auto-launch daily, e.g. "9:00"
+  workspace unschedule <name>       Remove a scheduled launch
   workspace schedules               List all scheduled workspaces
   workspace shortcuts               Print all registered shortcuts
   workspace help                    Show this message
 
-Config files live in: ~/.workspaces/<n>.json
+Config files live in: ~/.workspaces/<name>.json
 
 Example JSON:
   {
     "name": "work",
     "shortcut": "ctrl+shift+1",
-    "scripts": ["cd ~/Desktop && code ."],
+    "scripts": ["cd ~/Desktop"],
     "apps": [
-      { "app": "Slack",   "zone": "right-half",  "monitor": 1 },
-      { "app": "Safari",  "zone": "left-half",   "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" },
-      { "app": "Terminal","zone": "full",         "monitor": 2 }
+      { "app": "Slack",    "zone": "right-half", "monitor": 1 },
+      { "app": "Safari",   "zone": "left-half",  "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" },
+      { "app": "Terminal", "zone": "full",        "monitor": 2 }
     ]
   }
 
@@ -51,148 +52,222 @@ EOF
 die()  { echo "❌  $*" >&2; exit 1; }
 info() { echo "→  $*"; }
 
-require_jq() {
-  command -v jq &>/dev/null || die "jq is required. Install with: brew install jq"
+# ── read a single value from a JSON file via JXA ──────────────────────────────
+
+json_get() {
+  local file="$1"
+  local expr="$2"   # JS expression evaluated against the parsed object, e.g. 'o.name'
+  osascript -l JavaScript <<JSEOF
+var o = JSON.parse($.NSString.stringWithContentsOfFileEncodingError('$file', $.NSUTF8StringEncoding, null).js);
+var v = $expr;
+v === undefined || v === null ? "" : String(v);
+JSEOF
 }
 
-# ── zone → {x, y, w, h} as fractions of a single screen ──────────────────────
+# ── run the entire launch sequence in one JXA pass ────────────────────────────
+# Reads config, runs scripts, then launches + positions every app.
 
-zone_fracs() {
-  case "$1" in
-    full)                   echo "0    0    1    1"    ;;
-    left-half)              echo "0    0    0.5  1"    ;;
-    right-half)             echo "0.5  0    0.5  1"    ;;
-    top-half)               echo "0    0    1    0.5"  ;;
-    bottom-half)            echo "0    0.5  1    0.5"  ;;
-    top-left-quarter)       echo "0    0    0.5  0.5"  ;;
-    top-right-quarter)      echo "0.5  0    0.5  0.5"  ;;
-    bottom-left-quarter)    echo "0    0.5  0.5  0.5"  ;;
-    bottom-right-quarter)   echo "0.5  0.5  0.5  0.5"  ;;
-    center-large)           echo "0.1  0.1  0.8  0.8"  ;;
-    center-small)           echo "0.2  0.2  0.6  0.6"  ;;
-    *) die "Unknown zone '$1'. Run 'workspace help' for valid zones." ;;
-  esac
-}
-
-# ── get origin + dimensions of a monitor (1-based index) ─────────────────────
-# Returns: origin_x origin_y screen_w screen_h
-# Monitor 1 = primary display. Monitor 2 = next display to the right.
-
-get_monitor_bounds() {
-  local monitor="${1:-1}"
-  python3 - "$monitor" <<'PYEOF'
-import subprocess, sys, json, re
-
-monitor_idx = int(sys.argv[1]) - 1  # 0-based
-
-# Get primary screen size via AppleScript
-result = subprocess.run(
-    ["osascript", "-e",
-     'tell application "Finder"\nset b to bounds of window of desktop\nend tell\nreturn b'],
-    capture_output=True, text=True
-)
-parts = result.stdout.strip().split(", ")
-primary_w = int(parts[2])
-primary_h = int(parts[3])
-
-if monitor_idx == 0:
-    print(f"0 0 {primary_w} {primary_h}")
-    sys.exit(0)
-
-# Try system_profiler for additional displays
-try:
-    sp = subprocess.run(
-        ["system_profiler", "SPDisplaysDataType", "-json"],
-        capture_output=True, text=True, timeout=5
-    )
-    data = json.loads(sp.stdout)
-    displays = data.get("SPDisplaysDataType", [{}])[0].get("spdisplays_ndrvs", [])
-    if monitor_idx < len(displays):
-        res_str = displays[monitor_idx].get("_spdisplays_resolution", "")
-        m = re.search(r'(\d+)\s*x\s*(\d+)', res_str)
-        if m:
-            w, h = int(m.group(1)), int(m.group(2))
-            print(f"{primary_w} 0 {w} {h}")
-            sys.exit(0)
-except Exception:
-    pass
-
-# Fallback: assume second monitor mirrors primary, placed to the right
-print(f"{primary_w} 0 {primary_w} {primary_h}")
-PYEOF
-}
-
-# ── open a URL in a browser app ───────────────────────────────────────────────
-
-open_url() {
-  local app="$1"
-  local url="$2"
-  osascript <<APPLESCRIPT
-tell application "$app"
-  activate
-  open location "$url"
-end tell
-APPLESCRIPT
-}
-
-# ── launch + position one app ─────────────────────────────────────────────────
-
-position_app() {
-  local app="$1"
-  local zone="$2"
-  local monitor="${3:-1}"
-  local url="${4:-}"
-
-  if [[ -n "$url" ]]; then
-    open_url "$app" "$url"
-  else
-    osascript -e "tell application \"$app\" to activate"
-  fi
-
-  sleep 1.2
-
-  read -r xf yf wf hf       <<< "$(zone_fracs "$zone")"
-  read -r origin_x origin_y screen_w screen_h <<< "$(get_monitor_bounds "$monitor")"
-
-  osascript <<APPLESCRIPT
-set ox to $origin_x
-set oy to $origin_y
-set sw to $screen_w
-set sh to $screen_h
-
-set px to (ox + (sw * $xf)) as integer
-set py to (oy + (sh * $yf)) as integer
-set pw to (sw * $wf) as integer
-set ph to (sh * $hf) as integer
-
-tell application "System Events"
-  tell process "$app"
-    if (count of windows) > 0 then
-      tell front window
-        set position to {px, py}
-        set size to {pw, ph}
-      end tell
-    end if
-  end tell
-end tell
-APPLESCRIPT
-}
-
-# ── run scripts ───────────────────────────────────────────────────────────────
-
-run_scripts() {
+jxa_launch() {
   local config="$1"
-  local count
-  count=$(jq '.scripts | length' "$config" 2>/dev/null || echo 0)
-  [[ "$count" -eq 0 ]] && return
+  osascript -l JavaScript <<'JSEOF'
+ObjC.import('Foundation');
+ObjC.import('AppKit');
 
-  info "Running scripts..."
-  for i in $(seq 0 $((count - 1))); do
-    local script
-    script=$(jq -r ".scripts[$i]" "$config")
-    info "  $ $script"
-    eval "$script" || echo "  ⚠️  Script exited non-zero: $script"
-  done
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+function sleep(ms) {
+  var date = new Date();
+  while (new Date() - date < ms) {}
+}
+
+function zoneRect(zone, ox, oy, sw, sh) {
+  var z = {
+    'full':                  [0,    0,    1,    1   ],
+    'left-half':             [0,    0,    0.5,  1   ],
+    'right-half':            [0.5,  0,    0.5,  1   ],
+    'top-half':              [0,    0,    1,    0.5 ],
+    'bottom-half':           [0,    0.5,  1,    0.5 ],
+    'top-left-quarter':      [0,    0,    0.5,  0.5 ],
+    'top-right-quarter':     [0.5,  0,    0.5,  0.5 ],
+    'bottom-left-quarter':   [0,    0.5,  0.5,  0.5 ],
+    'bottom-right-quarter':  [0.5,  0.5,  0.5,  0.5 ],
+    'center-large':          [0.1,  0.1,  0.8,  0.8 ],
+    'center-small':          [0.2,  0.2,  0.6,  0.6 ],
+  }[zone];
+  if (!z) throw new Error("Unknown zone: " + zone);
+  return {
+    x: Math.round(ox + z[0] * sw),
+    y: Math.round(oy + z[1] * sh),
+    w: Math.round(z[2] * sw),
+    h: Math.round(z[3] * sh),
+  };
+}
+
+function monitorBounds(monitorIdx) {
+  // monitorIdx is 0-based
+  var screens = $.NSScreen.screens;
+  var idx = monitorIdx < screens.count ? monitorIdx : 0;
+  var primaryH = $.NSScreen.screens.objectAtIndex(0).frame.size.height;
+  var frame = $.NSScreen.screens.objectAtIndex(idx).frame;
+  return {
+    ox: Math.round(frame.origin.x),
+    oy: Math.round(primaryH - frame.origin.y - frame.size.height),
+    sw: Math.round(frame.size.width),
+    sh: Math.round(frame.size.height),
+  };
+}
+
+function activateAndPosition(appName, zone, monitorIdx, url) {
+  var app = Application(appName);
+  app.includeStandardAdditions = true;
+
+  if (url) {
+    app.activate();
+    app.openLocation(url);
+  } else {
+    app.activate();
+  }
+
+  // wait for app window to appear
+  var waited = 0;
+  while (waited < 3000) {
+    sleep(200);
+    waited += 200;
+    try {
+      if (Application('System Events').processes[appName].windows.length > 0) break;
+    } catch(e) {}
+  }
+
+  var mb  = monitorBounds(monitorIdx);
+  var r   = zoneRect(zone, mb.ox, mb.oy, mb.sw, mb.sh);
+  var se  = Application('System Events');
+  var proc = se.processes[appName];
+  if (proc.windows.length > 0) {
+    proc.windows[0].position = [r.x, r.y];
+    proc.windows[0].size     = [r.w, r.h];
+  }
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────
+
+var configPath = Application('bash').doShellScript('echo ' + $.NSProcessInfo.processInfo.environment.objectForKey('WS_CONFIG').js);
+JSEOF
+
+  # Re-invoke with config path injected via env
+  WS_CONFIG="$config" osascript -l JavaScript <<JSEOF
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+
+function sleep(ms) {
+  var start = new Date();
+  while (new Date() - start < ms) {}
+}
+
+function zoneRect(zone, ox, oy, sw, sh) {
+  var zones = {
+    'full':                  [0,    0,    1,    1   ],
+    'left-half':             [0,    0,    0.5,  1   ],
+    'right-half':            [0.5,  0,    0.5,  1   ],
+    'top-half':              [0,    0,    1,    0.5 ],
+    'bottom-half':           [0,    0.5,  1,    0.5 ],
+    'top-left-quarter':      [0,    0,    0.5,  0.5 ],
+    'top-right-quarter':     [0.5,  0,    0.5,  0.5 ],
+    'bottom-left-quarter':   [0,    0.5,  0.5,  0.5 ],
+    'bottom-right-quarter':  [0.5,  0.5,  0.5,  0.5 ],
+    'center-large':          [0.1,  0.1,  0.8,  0.8 ],
+    'center-small':          [0.2,  0.2,  0.6,  0.6 ],
+  };
+  var z = zones[zone];
+  if (!z) throw new Error('Unknown zone: ' + zone);
+  return {
+    x: Math.round(ox + z[0] * sw),
+    y: Math.round(oy + z[1] * sh),
+    w: Math.round(z[2] * sw),
+    h: Math.round(z[3] * sh),
+  };
+}
+
+function monitorBounds(monitorIdx) {
+  var screens = $.NSScreen.screens;
+  var idx = (monitorIdx < screens.count) ? monitorIdx : 0;
+  var primaryH = $.NSScreen.screens.objectAtIndex(0).frame.size.height;
+  var frame = $.NSScreen.screens.objectAtIndex(idx).frame;
+  return {
+    ox: Math.round(frame.origin.x),
+    oy: Math.round(primaryH - frame.origin.y - frame.size.height),
+    sw: Math.round(frame.size.width),
+    sh: Math.round(frame.size.height),
+  };
+}
+
+function waitForWindow(appName, timeoutMs) {
+  var se = Application('System Events');
+  var waited = 0;
+  while (waited < timeoutMs) {
+    sleep(200);
+    waited += 200;
+    try {
+      if (se.processes.byName(appName).windows.length > 0) return true;
+    } catch(e) {}
+  }
+  return false;
+}
+
+function positionApp(appName, zone, monitorIdx, url) {
+  var app = Application(appName);
+  if (url) {
+    app.activate();
+    app.openLocation(url);
+  } else {
+    app.activate();
+  }
+
+  waitForWindow(appName, 3000);
+
+  var mb = monitorBounds(monitorIdx);
+  var r  = zoneRect(zone, mb.ox, mb.oy, mb.sw, mb.sh);
+  var se = Application('System Events');
+  try {
+    var wins = se.processes.byName(appName).windows;
+    if (wins.length > 0) {
+      wins[0].position = [r.x, r.y];
+      wins[0].size     = [r.w, r.h];
+    }
+  } catch(e) {
+    // window may not support positioning (e.g. fullscreen)
+  }
+}
+
+// ── read config ───────────────────────────────────────────────────────────────
+
+var configPath = $.NSProcessInfo.processInfo.environment.objectForKey('WS_CONFIG').js;
+var raw = $.NSString.stringWithContentsOfFileEncodingError(configPath, $.NSUTF8StringEncoding, null).js;
+var cfg = JSON.parse(raw);
+
+// ── run scripts ───────────────────────────────────────────────────────────────
+
+var scripts = cfg.scripts || [];
+for (var s = 0; s < scripts.length; s++) {
+  Application('Terminal'); // ensure shell is available
+  var sh = Application('bash');
+  sh.includeStandardAdditions = true;
+  sh.doShellScript(scripts[s]);
+}
+
+// ── launch apps ───────────────────────────────────────────────────────────────
+
+var apps = cfg.apps || [];
+for (var i = 0; i < apps.length; i++) {
+  var entry   = apps[i];
+  var appName = entry.app;
+  var zone    = entry.zone;
+  var monitor = (entry.monitor || 1) - 1;  // convert to 0-based
+  var url     = entry.url || '';
+  positionApp(appName, zone, monitor, url);
+}
+
+cfg.name + ' launched (' + apps.length + ' apps)';
+JSEOF
 }
 
 # ── subcommands ────────────────────────────────────────────────────────────────
@@ -201,16 +276,22 @@ cmd_list() {
   mkdir -p "$WORKSPACES_DIR"
   local files=("$WORKSPACES_DIR"/*.json)
   if [[ ! -e "${files[0]}" ]]; then
-    echo "No workspaces yet. Create one with: workspace edit <n>"
+    echo "No workspaces yet. Create one with: workspace edit <name>"
     return
   fi
   echo "Saved workspaces:"
   for f in "${files[@]}"; do
-    local name shortcut scheduled
+    local name scheduled
     name=$(basename "$f" .json)
-    shortcut=""
     scheduled=""
-    command -v jq &>/dev/null && shortcut=$(jq -r '.shortcut // ""' "$f")
+    local shortcut
+    shortcut=$(osascript -l JavaScript <<JSEOF
+ObjC.import('Foundation');
+var raw = $.NSString.stringWithContentsOfFileEncodingError('$f', $.NSUTF8StringEncoding, null).js;
+var o = JSON.parse(raw);
+o.shortcut || '';
+JSEOF
+)
     local plist="$LAUNCH_AGENTS_DIR/com.workspace.$name.plist"
     [[ -f "$plist" ]] && scheduled=" [scheduled]"
     if [[ -n "$shortcut" ]]; then
@@ -243,13 +324,18 @@ EOF
 }
 
 cmd_shortcuts() {
-  require_jq
   mkdir -p "$WORKSPACES_DIR"
   local found=false
   for f in "$WORKSPACES_DIR"/*.json; do
     [[ -e "$f" ]] || continue
     local sc
-    sc=$(jq -r '.shortcut // ""' "$f")
+    sc=$(osascript -l JavaScript <<JSEOF
+ObjC.import('Foundation');
+var raw = $.NSString.stringWithContentsOfFileEncodingError('$f', $.NSUTF8StringEncoding, null).js;
+var o = JSON.parse(raw);
+o.shortcut || '';
+JSEOF
+)
     if [[ -n "$sc" ]]; then
       printf "  %-15s  %s\n" "$(basename "$f" .json)" "$sc"
       found=true
@@ -258,11 +344,10 @@ cmd_shortcuts() {
   $found || echo "No shortcuts registered in any workspace."
   echo ""
   echo "Note: shortcuts in the JSON are for reference — wire them up via"
-  echo "Raycast, BetterTouchTool, or macOS Shortcuts to run: workspace <n>"
+  echo "Raycast, BetterTouchTool, or macOS Shortcuts to run: workspace <name>"
 }
 
 cmd_schedule() {
-  require_jq
   local name="$1"
   local time="$2"
   local config="$WORKSPACES_DIR/$name.json"
@@ -337,11 +422,11 @@ cmd_schedules() {
 }
 
 cmd_launch() {
-  require_jq
   local name="$1"
   local config="$WORKSPACES_DIR/$name.json"
   [[ -f "$config" ]] || die "No workspace named '$name'. File not found: $config"
 
+  # Check accessibility permission
   osascript -e 'tell application "System Events" to get name of first process' &>/dev/null || {
     echo "⚠️  Accessibility access needed."
     echo "   Go to: System Settings → Privacy & Security → Accessibility"
@@ -349,27 +434,124 @@ cmd_launch() {
     exit 1
   }
 
-  local total ws_name
-  total=$(jq '.apps | length' "$config")
-  ws_name=$(jq -r '.name' "$config")
+  # Read name + app count for the status line (single JXA call)
+  local ws_info
+  ws_info=$(osascript -l JavaScript <<JSEOF
+ObjC.import('Foundation');
+var raw = $.NSString.stringWithContentsOfFileEncodingError('$config', $.NSUTF8StringEncoding, null).js;
+var o = JSON.parse(raw);
+o.name + '|' + (o.apps || []).length + '|' + (o.scripts || []).join('§');
+JSEOF
+)
+  local ws_name total scripts_raw
+  ws_name=$(echo "$ws_info"    | cut -d'|' -f1)
+  total=$(echo "$ws_info"      | cut -d'|' -f2)
+  scripts_raw=$(echo "$ws_info"| cut -d'|' -f3)
 
   echo "🚀  Launching workspace: $ws_name ($total apps)"
 
-  run_scripts "$config"
+  # Run scripts
+  if [[ -n "$scripts_raw" ]]; then
+    info "Running scripts..."
+    IFS='§' read -ra scripts <<< "$scripts_raw"
+    for script in "${scripts[@]}"; do
+      info "  $ $script"
+      eval "$script" || echo "  ⚠️  Script exited non-zero: $script"
+    done
+  fi
 
-  for i in $(seq 0 $((total - 1))); do
-    local app zone monitor url
-    app=$(jq -r     ".apps[$i].app"        "$config")
-    zone=$(jq -r    ".apps[$i].zone"       "$config")
-    monitor=$(jq -r ".apps[$i].monitor // 1" "$config")
-    url=$(jq -r     ".apps[$i].url // \"\""  "$config")
+  # Launch and position all apps in one JXA pass
+  info "Positioning apps..."
+  WS_CONFIG="$config" osascript -l JavaScript <<'JSEOF'
+ObjC.import('Foundation');
+ObjC.import('AppKit');
 
-    local label="$app → $zone (monitor $monitor)"
-    [[ -n "$url" ]] && label="$label  [$url]"
-    info "[$((i+1))/$total] $label"
+function sleep(ms) {
+  var start = new Date();
+  while (new Date() - start < ms) {}
+}
 
-    position_app "$app" "$zone" "$monitor" "$url"
-  done
+function zoneRect(zone, ox, oy, sw, sh) {
+  var zones = {
+    'full':                  [0,    0,    1,    1   ],
+    'left-half':             [0,    0,    0.5,  1   ],
+    'right-half':            [0.5,  0,    0.5,  1   ],
+    'top-half':              [0,    0,    1,    0.5 ],
+    'bottom-half':           [0,    0.5,  1,    0.5 ],
+    'top-left-quarter':      [0,    0,    0.5,  0.5 ],
+    'top-right-quarter':     [0.5,  0,    0.5,  0.5 ],
+    'bottom-left-quarter':   [0,    0.5,  0.5,  0.5 ],
+    'bottom-right-quarter':  [0.5,  0.5,  0.5,  0.5 ],
+    'center-large':          [0.1,  0.1,  0.8,  0.8 ],
+    'center-small':          [0.2,  0.2,  0.6,  0.6 ],
+  };
+  var z = zones[zone];
+  if (!z) throw new Error('Unknown zone: ' + zone);
+  return {
+    x: Math.round(ox + z[0] * sw),
+    y: Math.round(oy + z[1] * sh),
+    w: Math.round(z[2] * sw),
+    h: Math.round(z[3] * sh),
+  };
+}
+
+function monitorBounds(monitorIdx) {
+  var screens = $.NSScreen.screens;
+  var idx = (monitorIdx < screens.count) ? monitorIdx : 0;
+  var primaryH = $.NSScreen.screens.objectAtIndex(0).frame.size.height;
+  var frame = $.NSScreen.screens.objectAtIndex(idx).frame;
+  return {
+    ox: Math.round(frame.origin.x),
+    oy: Math.round(primaryH - frame.origin.y - frame.size.height),
+    sw: Math.round(frame.size.width),
+    sh: Math.round(frame.size.height),
+  };
+}
+
+function waitForWindow(appName, timeoutMs) {
+  var se = Application('System Events');
+  var waited = 0;
+  while (waited < timeoutMs) {
+    sleep(200);
+    waited += 200;
+    try {
+      if (se.processes.byName(appName).windows.length > 0) return true;
+    } catch(e) {}
+  }
+  return false;
+}
+
+function positionApp(appName, zone, monitorIdx, url) {
+  var app = Application(appName);
+  if (url) {
+    app.activate();
+    app.openLocation(url);
+  } else {
+    app.activate();
+  }
+  waitForWindow(appName, 3000);
+  var mb = monitorBounds(monitorIdx);
+  var r  = zoneRect(zone, mb.ox, mb.oy, mb.sw, mb.sh);
+  var se = Application('System Events');
+  try {
+    var wins = se.processes.byName(appName).windows;
+    if (wins.length > 0) {
+      wins[0].position = [r.x, r.y];
+      wins[0].size     = [r.w, r.h];
+    }
+  } catch(e) {}
+}
+
+var configPath = $.NSProcessInfo.processInfo.environment.objectForKey('WS_CONFIG').js;
+var raw = $.NSString.stringWithContentsOfFileEncodingError(configPath, $.NSUTF8StringEncoding, null).js;
+var cfg = JSON.parse(raw);
+var apps = cfg.apps || [];
+for (var i = 0; i < apps.length; i++) {
+  var e = apps[i];
+  positionApp(e.app, e.zone, (e.monitor || 1) - 1, e.url || '');
+}
+'done';
+JSEOF
 
   echo "✅  Done."
 }
@@ -381,10 +563,10 @@ mkdir -p "$WORKSPACES_DIR"
 case "${1:-}" in
   help|--help|-h)  usage ;;
   list)            cmd_list ;;
-  edit)            [[ -n "${2:-}" ]] || die "Usage: workspace edit <n>"; cmd_edit "$2" ;;
+  edit)            [[ -n "${2:-}" ]] || die "Usage: workspace edit <name>"; cmd_edit "$2" ;;
   shortcuts)       cmd_shortcuts ;;
-  schedule)        [[ -n "${2:-}" && -n "${3:-}" ]] || die "Usage: workspace schedule <n> <time>"; cmd_schedule "$2" "$3" ;;
-  unschedule)      [[ -n "${2:-}" ]] || die "Usage: workspace unschedule <n>"; cmd_unschedule "$2" ;;
+  schedule)        [[ -n "${2:-}" && -n "${3:-}" ]] || die "Usage: workspace schedule <name> <time>"; cmd_schedule "$2" "$3" ;;
+  unschedule)      [[ -n "${2:-}" ]] || die "Usage: workspace unschedule <name>"; cmd_unschedule "$2" ;;
   schedules)       cmd_schedules ;;
   "")              usage ;;
   *)               cmd_launch "$1" ;;

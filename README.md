@@ -17,50 +17,20 @@ workspace work
 ## Requirements
 
 - macOS
-- [Homebrew](https://brew.sh)
-- [jq](https://stedolan.github.io/jq/)
-- python3 (pre-installed on macOS)
+
+No external dependencies. JSON parsing, window management, and display detection all use JXA (JavaScript for Automation) and AppleScript, which are built into every Mac.
 
 ---
 
 ## Installation
 
-**1. Clone the repo**
-
 ```bash
-git clone https://github.com/yourusername/workspace.git
-cd workspace
+git clone https://github.com/yourusername/workspace.git && cd workspace
+sudo cp workspace /usr/local/bin/workspace && sudo chmod +x /usr/local/bin/workspace
+mkdir -p ~/.workspaces && cp examples/*.json ~/.workspaces/
 ```
 
-**2. Install jq**
-
-```bash
-brew install jq
-```
-
-**3. Move the script onto your PATH and make it executable**
-
-```bash
-sudo cp workspace /usr/local/bin/workspace
-sudo chmod +x /usr/local/bin/workspace
-```
-
-**4. Grant Accessibility permission**
-
-The tool uses AppleScript to move and resize windows, which requires Accessibility access.
-
-Go to **System Settings → Privacy & Security → Accessibility** and add your terminal app (Terminal, iTerm2, etc.).
-
-> After granting permission, restart your terminal for it to take effect.
-
-**5. Set up your workspaces folder**
-
-```bash
-mkdir -p ~/.workspaces
-cp examples/*.json ~/.workspaces/
-```
-
-The repo includes `work.json` and `focus.json` as starting points — edit them to match your apps and preferred layout.
+Then go to **System Settings → Privacy & Security → Accessibility** and add your terminal app. Restart your terminal once after granting access.
 
 ---
 
@@ -277,5 +247,3 @@ Make sure `"monitor": 2` is set and a second display is connected. Monitor indic
 **Scheduled workspace didn't launch**
 Check the log at `~/.workspaces/<name>.schedule.log`. The most common cause is the Mac being asleep at the scheduled time.
 
-**`jq: command not found`**
-Run `brew install jq`.
