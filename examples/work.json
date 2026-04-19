@@ -1,8 +1,9 @@
 {
   "name": "work",
   "shortcut": "ctrl+shift+1",
+  "scripts": ["cd ~/Desktop"],
   "apps": [
-    { "app": "Slack",   "zone": "right-half" },
-    { "app": "Safari",  "zone": "left-half"  }
+    { "app": "Slack",   "zone": "right-half", "monitor": 1 },
+    { "app": "Safari",  "zone": "left-half",  "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" }
   ]
 }

@@ -1,9 +1,10 @@
 {
   "name": "focus",
   "shortcut": "ctrl+shift+2",
+  "scripts": ["cd ~/Desktop"],
   "apps": [
-    { "app": "Visual Studio Code", "zone": "left-half" },
-    { "app": "Terminal",           "zone": "bottom-right-quarter" },
-    { "app": "Safari",             "zone": "top-right-quarter" }
+    { "app": "Code",     "zone": "left-half",            "monitor": 1 },
+    { "app": "Terminal", "zone": "bottom-right-quarter", "monitor": 1 },
+    { "app": "Safari",   "zone": "top-right-quarter",    "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" }
   ]
 }

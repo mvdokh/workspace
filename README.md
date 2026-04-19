@@ -5,8 +5,10 @@ A Mac CLI tool that launches and arranges apps on your screen from a JSON config
 ```bash
 workspace work
 # 🚀  Launching workspace: work (2 apps)
-# →  [1/2] Slack → right-half
-# →  [2/2] Safari → left-half
+# →  Running scripts...
+# →    $ cd ~/Desktop
+# →  [1/2] Slack → right-half (monitor 1)
+# →  [2/2] Safari → left-half (monitor 1)  [https://en.wikipedia.org/wiki/Hippocrates]
 # ✅  Done.
 ```
 
@@ -15,8 +17,9 @@ workspace work
 ## Requirements
 
 - macOS
-- [Homebrew](https://brew.sh) — for installing jq
+- [Homebrew](https://brew.sh)
 - [jq](https://stedolan.github.io/jq/)
+- python3 (pre-installed on macOS)
 
 ---
 
@@ -57,32 +60,38 @@ mkdir -p ~/.workspaces
 cp examples/*.json ~/.workspaces/
 ```
 
-The repo includes `work.json` and `focus.json` as starting points — edit them to match your apps, or create your own.
+The repo includes `work.json` and `focus.json` as starting points — edit them to match your apps and preferred layout.
 
 ---
 
 ## Usage
 
 ```bash
-workspace <name>          # Launch a workspace by name
-workspace list            # List all saved workspaces
-workspace edit <name>     # Create or edit a workspace config
-workspace shortcuts       # Print all registered shortcuts
-workspace help            # Show help
+workspace <n>                  # Launch a workspace by name
+workspace list                    # List all saved workspaces
+workspace edit <n>             # Create or edit a workspace config
+workspace schedule <n> <time>  # Auto-launch daily at a given time
+workspace unschedule <n>       # Remove a scheduled launch
+workspace schedules               # List all scheduled workspaces
+workspace shortcuts               # Print all registered shortcut keys
+workspace help                    # Show help
 ```
 
-### Example
+### Examples
 
 ```bash
-workspace work            # Launches ~/.workspaces/work.json
-workspace focus           # Launches ~/.workspaces/focus.json
+workspace work                    # Launch ~/.workspaces/work.json
+workspace focus                   # Launch ~/.workspaces/focus.json
+workspace schedule work 9:00      # Auto-launch 'work' every day at 9:00 AM
+workspace unschedule work         # Remove that schedule
+workspace schedules               # See all active schedules
 ```
 
 ---
 
 ## Config Files
 
-Workspace configs live in `~/.workspaces/<name>.json`.
+Workspace configs live in `~/.workspaces/<n>.json`.
 
 ### Format
 
@@ -90,19 +99,23 @@ Workspace configs live in `~/.workspaces/<name>.json`.
 {
   "name": "work",
   "shortcut": "ctrl+shift+1",
+  "scripts": ["cd ~/Desktop"],
   "apps": [
-    { "app": "Slack",   "zone": "right-half" },
-    { "app": "Safari",  "zone": "left-half"  }
+    { "app": "Slack",   "zone": "right-half", "monitor": 1 },
+    { "app": "Safari",  "zone": "left-half",  "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" }
   ]
 }
 ```
 
-| Field      | Description                                              |
-|------------|----------------------------------------------------------|
-| `name`     | Display name for the workspace                           |
-| `shortcut` | Optional shortcut key (for reference — see note below)   |
-| `app`      | Exact app name as it appears in Activity Monitor         |
-| `zone`     | Where to place the window on screen                      |
+| Field      | Description                                                            |
+|------------|------------------------------------------------------------------------|
+| `name`     | Display name for the workspace                                         |
+| `shortcut` | Optional shortcut key (for reference — see Shortcuts section below)    |
+| `scripts`  | Shell commands to run before launching apps                            |
+| `app`      | Exact app name as shown in Activity Monitor                            |
+| `zone`     | Where to place the window on screen                                    |
+| `monitor`  | Which display to use: `1` = primary, `2` = secondary (default: `1`)   |
+| `url`      | URL to open in the app (browsers only, optional)                       |
 
 > **App names:** If an app doesn't position correctly, open Activity Monitor and use the exact process name shown there. For example, VS Code is `"Code"`, not `"Visual Studio Code"`.
 
@@ -110,47 +123,117 @@ Workspace configs live in `~/.workspaces/<name>.json`.
 
 ## Zones
 
-| Zone                    | Position              |
-|-------------------------|-----------------------|
-| `full`                  | Full screen           |
-| `left-half`             | Left 50%              |
-| `right-half`            | Right 50%             |
-| `top-half`              | Top 50%               |
-| `bottom-half`           | Bottom 50%            |
-| `top-left-quarter`      | Top-left quadrant     |
-| `top-right-quarter`     | Top-right quadrant    |
-| `bottom-left-quarter`   | Bottom-left quadrant  |
-| `bottom-right-quarter`  | Bottom-right quadrant |
-| `center-large`          | Centered, 80% of screen |
-| `center-small`          | Centered, 60% of screen |
+| Zone                    | Position                  |
+|-------------------------|---------------------------|
+| `full`                  | Full screen               |
+| `left-half`             | Left 50%                  |
+| `right-half`            | Right 50%                 |
+| `top-half`              | Top 50%                   |
+| `bottom-half`           | Bottom 50%                |
+| `top-left-quarter`      | Top-left quadrant         |
+| `top-right-quarter`     | Top-right quadrant        |
+| `bottom-left-quarter`   | Bottom-left quadrant      |
+| `bottom-right-quarter`  | Bottom-right quadrant     |
+| `center-large`          | Centered, 80% of screen   |
+| `center-small`          | Centered, 60% of screen   |
+
+---
+
+## Multi-Monitor Support
+
+Set `"monitor": 1` or `"monitor": 2` per app to target a specific display. Monitor `1` is always your primary display (the one with the menu bar). Monitor `2` is the next connected display.
+
+```json
+{
+  "name": "dual",
+  "apps": [
+    { "app": "Slack",   "zone": "full",      "monitor": 2 },
+    { "app": "Safari",  "zone": "left-half", "monitor": 1 },
+    { "app": "Code",    "zone": "right-half","monitor": 1 }
+  ]
+}
+```
+
+If `"monitor"` is omitted it defaults to `1`.
+
+---
+
+## Scripts
+
+The `scripts` array runs shell commands before any apps are launched. Useful for navigating to a directory, starting a server, or any other setup step.
+
+```json
+{
+  "scripts": [
+    "cd ~/Desktop",
+    "cd ~/Desktop && npm start"
+  ]
+}
+```
+
+Scripts run in order and in the context of your current shell session.
+
+---
+
+## Scheduling
+
+Use `workspace schedule` to auto-launch a workspace daily at a set time via macOS launchd.
+
+```bash
+workspace schedule work 9:00      # Launch 'work' every day at 9:00 AM
+workspace schedule focus 13:30    # Launch 'focus' every day at 1:30 PM
+workspace schedules               # See all active schedules
+workspace unschedule work         # Remove the 'work' schedule
+```
+
+Logs are written to `~/.workspaces/<name>.schedule.log` so you can debug if something doesn't launch as expected.
+
+> The schedule will only fire if your Mac is awake at that time. If it's asleep, the launch will be skipped until the next day.
 
 ---
 
 ## Example Configs
 
-### Work layout — Slack + Safari side by side
+### work — Slack + Safari side by side
 
 ```json
 {
   "name": "work",
   "shortcut": "ctrl+shift+1",
+  "scripts": ["cd ~/Desktop"],
   "apps": [
-    { "app": "Slack",  "zone": "right-half" },
-    { "app": "Safari", "zone": "left-half"  }
+    { "app": "Slack",  "zone": "right-half", "monitor": 1 },
+    { "app": "Safari", "zone": "left-half",  "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" }
   ]
 }
 ```
 
-### Focus layout — code + terminal + browser
+### focus — code + terminal + browser
 
 ```json
 {
   "name": "focus",
   "shortcut": "ctrl+shift+2",
+  "scripts": ["cd ~/Desktop"],
   "apps": [
-    { "app": "Code",     "zone": "left-half"             },
-    { "app": "Terminal", "zone": "bottom-right-quarter"  },
-    { "app": "Safari",   "zone": "top-right-quarter"     }
+    { "app": "Code",     "zone": "left-half",            "monitor": 1 },
+    { "app": "Terminal", "zone": "bottom-right-quarter", "monitor": 1 },
+    { "app": "Safari",   "zone": "top-right-quarter",    "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" }
+  ]
+}
+```
+
+### dual — apps spread across two monitors
+
+```json
+{
+  "name": "dual",
+  "shortcut": "ctrl+shift+3",
+  "scripts": ["cd ~/Desktop"],
+  "apps": [
+    { "app": "Code",     "zone": "full",      "monitor": 2 },
+    { "app": "Safari",   "zone": "left-half", "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" },
+    { "app": "Terminal", "zone": "right-half","monitor": 1 }
   ]
 }
 ```
@@ -159,7 +242,7 @@ Workspace configs live in `~/.workspaces/<name>.json`.
 
 ## Keyboard Shortcuts
 
-The `shortcut` field in your JSON is for documentation. To actually trigger a workspace with a keypress, use one of these tools to run `workspace <name>`:
+The `shortcut` field in your JSON is for documentation. To actually trigger a workspace with a keypress, use one of these tools to run `workspace <n>`:
 
 - **[Raycast](https://raycast.com)** — assign a hotkey to a Script Command
 - **[BetterTouchTool](https://folivora.ai)** — bind a key combo to a shell script
@@ -169,13 +252,11 @@ The `shortcut` field in your JSON is for documentation. To actually trigger a wo
 
 ## Creating a New Workspace
 
-Use the built-in editor to scaffold a new config:
-
 ```bash
 workspace edit mysetup
 ```
 
-This creates `~/.workspaces/mysetup.json` with a template and opens it in your `$EDITOR`. Save and close, then run `workspace mysetup`.
+This creates `~/.workspaces/mysetup.json` from a template and opens it in your `$EDITOR`. Save, close, then run `workspace mysetup`.
 
 ---
 
@@ -190,5 +271,11 @@ Grant Accessibility permission in System Settings → Privacy & Security → Acc
 **App doesn't move / "Can't get process" error**
 The app name in your JSON doesn't match the process name. Check the exact name in Activity Monitor and update your config.
 
+**App opens on the wrong monitor**
+Make sure `"monitor": 2` is set and a second display is connected. Monitor indices are `1`-based; `1` is always the primary (menu bar) display.
+
+**Scheduled workspace didn't launch**
+Check the log at `~/.workspaces/<name>.schedule.log`. The most common cause is the Mac being asleep at the scheduled time.
+
 **`jq: command not found`**
-Install jq: `brew install jq`
+Run `brew install jq`.

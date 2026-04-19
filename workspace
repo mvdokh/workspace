@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 
 # workspace — launch and arrange apps from a JSON config
-# Usage: workspace <name>
-# Configs live in ~/.workspaces/<name>.json
+# Usage: workspace <n>
+# Configs live in ~/.workspaces/<n>.json
 
 set -euo pipefail
 
 WORKSPACES_DIR="$HOME/.workspaces"
-SHORTCUT_PLIST="$HOME/Library/LaunchAgents/com.workspace.shortcuts.plist"
+LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -16,22 +16,26 @@ usage() {
 workspace — arrange apps on screen from a JSON config
 
 Usage:
-  workspace <name>            Launch workspace by name
-  workspace list              List all saved workspaces
-  workspace edit <name>       Open config in \$EDITOR (creates if missing)
-  workspace shortcuts         Print all registered shortcuts
-  workspace help              Show this message
+  workspace <n>                  Launch workspace by name
+  workspace list                    List all saved workspaces
+  workspace edit <n>             Open config in \$EDITOR (creates if missing)
+  workspace schedule <n> <time>  Auto-launch at a time, e.g. "9:00"
+  workspace unschedule <n>       Remove a scheduled launch
+  workspace schedules               List all scheduled workspaces
+  workspace shortcuts               Print all registered shortcuts
+  workspace help                    Show this message
 
-Config files live in: ~/.workspaces/<name>.json
+Config files live in: ~/.workspaces/<n>.json
 
 Example JSON:
   {
     "name": "work",
     "shortcut": "ctrl+shift+1",
+    "scripts": ["cd ~/Desktop && code ."],
     "apps": [
-      { "app": "Slack",   "zone": "right-half" },
-      { "app": "Safari",  "zone": "left-half"  },
-      { "app": "Terminal","zone": "bottom-right-quarter" }
+      { "app": "Slack",   "zone": "right-half",  "monitor": 1 },
+      { "app": "Safari",  "zone": "left-half",   "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" },
+      { "app": "Terminal","zone": "full",         "monitor": 2 }
     ]
   }
 
@@ -44,15 +48,14 @@ Available zones:
 EOF
 }
 
-die() { echo "❌  $*" >&2; exit 1; }
+die()  { echo "❌  $*" >&2; exit 1; }
 info() { echo "→  $*"; }
 
 require_jq() {
   command -v jq &>/dev/null || die "jq is required. Install with: brew install jq"
 }
 
-# ── zone → {x, y, w, h} as fractions of screen ────────────────────────────────
-# Returns four space-separated values: x_frac y_frac w_frac h_frac
+# ── zone → {x, y, w, h} as fractions of a single screen ──────────────────────
 
 zone_fracs() {
   case "$1" in
@@ -71,35 +74,97 @@ zone_fracs() {
   esac
 }
 
+# ── get origin + dimensions of a monitor (1-based index) ─────────────────────
+# Returns: origin_x origin_y screen_w screen_h
+# Monitor 1 = primary display. Monitor 2 = next display to the right.
+
+get_monitor_bounds() {
+  local monitor="${1:-1}"
+  python3 - "$monitor" <<'PYEOF'
+import subprocess, sys, json, re
+
+monitor_idx = int(sys.argv[1]) - 1  # 0-based
+
+# Get primary screen size via AppleScript
+result = subprocess.run(
+    ["osascript", "-e",
+     'tell application "Finder"\nset b to bounds of window of desktop\nend tell\nreturn b'],
+    capture_output=True, text=True
+)
+parts = result.stdout.strip().split(", ")
+primary_w = int(parts[2])
+primary_h = int(parts[3])
+
+if monitor_idx == 0:
+    print(f"0 0 {primary_w} {primary_h}")
+    sys.exit(0)
+
+# Try system_profiler for additional displays
+try:
+    sp = subprocess.run(
+        ["system_profiler", "SPDisplaysDataType", "-json"],
+        capture_output=True, text=True, timeout=5
+    )
+    data = json.loads(sp.stdout)
+    displays = data.get("SPDisplaysDataType", [{}])[0].get("spdisplays_ndrvs", [])
+    if monitor_idx < len(displays):
+        res_str = displays[monitor_idx].get("_spdisplays_resolution", "")
+        m = re.search(r'(\d+)\s*x\s*(\d+)', res_str)
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            print(f"{primary_w} 0 {w} {h}")
+            sys.exit(0)
+except Exception:
+    pass
+
+# Fallback: assume second monitor mirrors primary, placed to the right
+print(f"{primary_w} 0 {primary_w} {primary_h}")
+PYEOF
+}
+
+# ── open a URL in a browser app ───────────────────────────────────────────────
+
+open_url() {
+  local app="$1"
+  local url="$2"
+  osascript <<APPLESCRIPT
+tell application "$app"
+  activate
+  open location "$url"
+end tell
+APPLESCRIPT
+}
+
 # ── launch + position one app ─────────────────────────────────────────────────
 
 position_app() {
   local app="$1"
   local zone="$2"
+  local monitor="${3:-1}"
+  local url="${4:-}"
 
-  read -r xf yf wf hf <<< "$(zone_fracs "$zone")"
+  if [[ -n "$url" ]]; then
+    open_url "$app" "$url"
+  else
+    osascript -e "tell application \"$app\" to activate"
+  fi
+
+  sleep 1.2
+
+  read -r xf yf wf hf       <<< "$(zone_fracs "$zone")"
+  read -r origin_x origin_y screen_w screen_h <<< "$(get_monitor_bounds "$monitor")"
 
   osascript <<APPLESCRIPT
--- get screen dimensions
-tell application "Finder"
-  set screenBounds to bounds of window of desktop
-  set sw to item 3 of screenBounds
-  set sh to item 4 of screenBounds
-end tell
+set ox to $origin_x
+set oy to $origin_y
+set sw to $screen_w
+set sh to $screen_h
 
--- compute pixel values
-set px to (sw * $xf) as integer
-set py to (sh * $yf) as integer
+set px to (ox + (sw * $xf)) as integer
+set py to (oy + (sh * $yf)) as integer
 set pw to (sw * $wf) as integer
 set ph to (sh * $hf) as integer
 
--- launch the app
-tell application "$app" to activate
-
--- wait for window
-delay 1.2
-
--- position it
 tell application "System Events"
   tell process "$app"
     if (count of windows) > 0 then
@@ -113,27 +178,45 @@ end tell
 APPLESCRIPT
 }
 
+# ── run scripts ───────────────────────────────────────────────────────────────
+
+run_scripts() {
+  local config="$1"
+  local count
+  count=$(jq '.scripts | length' "$config" 2>/dev/null || echo 0)
+  [[ "$count" -eq 0 ]] && return
+
+  info "Running scripts..."
+  for i in $(seq 0 $((count - 1))); do
+    local script
+    script=$(jq -r ".scripts[$i]" "$config")
+    info "  $ $script"
+    eval "$script" || echo "  ⚠️  Script exited non-zero: $script"
+  done
+}
+
 # ── subcommands ────────────────────────────────────────────────────────────────
 
 cmd_list() {
   mkdir -p "$WORKSPACES_DIR"
   local files=("$WORKSPACES_DIR"/*.json)
   if [[ ! -e "${files[0]}" ]]; then
-    echo "No workspaces yet. Create one with: workspace edit <name>"
+    echo "No workspaces yet. Create one with: workspace edit <n>"
     return
   fi
   echo "Saved workspaces:"
   for f in "${files[@]}"; do
-    local name
+    local name shortcut scheduled
     name=$(basename "$f" .json)
-    local shortcut=""
-    if command -v jq &>/dev/null; then
-      shortcut=$(jq -r '.shortcut // ""' "$f")
-    fi
+    shortcut=""
+    scheduled=""
+    command -v jq &>/dev/null && shortcut=$(jq -r '.shortcut // ""' "$f")
+    local plist="$LAUNCH_AGENTS_DIR/com.workspace.$name.plist"
+    [[ -f "$plist" ]] && scheduled=" [scheduled]"
     if [[ -n "$shortcut" ]]; then
-      printf "  %-20s  (%s)\n" "$name" "$shortcut"
+      printf "  %-20s  (%s)%s\n" "$name" "$shortcut" "$scheduled"
     else
-      printf "  %s\n" "$name"
+      printf "  %-20s%s\n" "$name" "$scheduled"
     fi
   done
 }
@@ -147,9 +230,10 @@ cmd_edit() {
 {
   "name": "$name",
   "shortcut": "ctrl+shift+1",
+  "scripts": ["cd ~/Desktop"],
   "apps": [
-    { "app": "Safari",   "zone": "left-half"  },
-    { "app": "Terminal", "zone": "right-half" }
+    { "app": "Safari",   "zone": "left-half",  "monitor": 1, "url": "https://en.wikipedia.org/wiki/Hippocrates" },
+    { "app": "Terminal", "zone": "right-half", "monitor": 1 }
   ]
 }
 EOF
@@ -174,8 +258,82 @@ cmd_shortcuts() {
   $found || echo "No shortcuts registered in any workspace."
   echo ""
   echo "Note: shortcuts in the JSON are for reference — wire them up via"
-  echo "System Settings → Keyboard → Shortcuts → App Shortcuts, or use"
-  echo "a tool like Raycast / BetterTouchTool to run: workspace <name>"
+  echo "Raycast, BetterTouchTool, or macOS Shortcuts to run: workspace <n>"
+}
+
+cmd_schedule() {
+  require_jq
+  local name="$1"
+  local time="$2"
+  local config="$WORKSPACES_DIR/$name.json"
+  [[ -f "$config" ]] || die "No workspace named '$name'. File not found: $config"
+
+  local hour minute
+  hour=$(echo "$time"   | cut -d: -f1)
+  minute=$(echo "$time" | cut -d: -f2)
+  [[ "$hour"   =~ ^[0-9]+$ ]] || die "Invalid time format. Use HH:MM, e.g. 9:00"
+  [[ "$minute" =~ ^[0-9]+$ ]] || die "Invalid time format. Use HH:MM, e.g. 9:00"
+
+  mkdir -p "$LAUNCH_AGENTS_DIR"
+  local plist="$LAUNCH_AGENTS_DIR/com.workspace.$name.plist"
+  local workspace_bin
+  workspace_bin=$(command -v workspace)
+
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.workspace.$name</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$workspace_bin</string>
+    <string>$name</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>$hour</integer>
+    <key>Minute</key>
+    <integer>$minute</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>$HOME/.workspaces/$name.schedule.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/.workspaces/$name.schedule.log</string>
+</dict>
+</plist>
+EOF
+
+  launchctl unload "$plist" 2>/dev/null || true
+  launchctl load "$plist"
+  echo "✅  Scheduled '$name' to launch daily at $(printf '%02d:%02d' "$hour" "$minute")."
+  echo "    Log: ~/.workspaces/$name.schedule.log"
+}
+
+cmd_unschedule() {
+  local name="$1"
+  local plist="$LAUNCH_AGENTS_DIR/com.workspace.$name.plist"
+  [[ -f "$plist" ]] || die "No schedule found for '$name'."
+  launchctl unload "$plist" 2>/dev/null || true
+  rm "$plist"
+  echo "✅  Removed schedule for '$name'."
+}
+
+cmd_schedules() {
+  local found=false
+  for plist in "$LAUNCH_AGENTS_DIR"/com.workspace.*.plist; do
+    [[ -e "$plist" ]] || continue
+    local name hour minute
+    name=$(basename "$plist" .plist | sed 's/com\.workspace\.//')
+    hour=$(grep -A1   '<key>Hour</key>'   "$plist" | grep integer | tr -dc '0-9')
+    minute=$(grep -A1 '<key>Minute</key>' "$plist" | grep integer | tr -dc '0-9')
+    printf "  %-20s  daily at %02d:%02d\n" "$name" "$hour" "$minute"
+    found=true
+  done
+  $found || echo "No workspaces are scheduled."
 }
 
 cmd_launch() {
@@ -184,7 +342,6 @@ cmd_launch() {
   local config="$WORKSPACES_DIR/$name.json"
   [[ -f "$config" ]] || die "No workspace named '$name'. File not found: $config"
 
-  # Check accessibility permission
   osascript -e 'tell application "System Events" to get name of first process' &>/dev/null || {
     echo "⚠️  Accessibility access needed."
     echo "   Go to: System Settings → Privacy & Security → Accessibility"
@@ -192,19 +349,26 @@ cmd_launch() {
     exit 1
   }
 
-  local total
+  local total ws_name
   total=$(jq '.apps | length' "$config")
-  local ws_name
   ws_name=$(jq -r '.name' "$config")
 
   echo "🚀  Launching workspace: $ws_name ($total apps)"
 
+  run_scripts "$config"
+
   for i in $(seq 0 $((total - 1))); do
-    local app zone
-    app=$(jq -r ".apps[$i].app" "$config")
-    zone=$(jq -r ".apps[$i].zone" "$config")
-    info "[$((i+1))/$total] $app → $zone"
-    position_app "$app" "$zone"
+    local app zone monitor url
+    app=$(jq -r     ".apps[$i].app"        "$config")
+    zone=$(jq -r    ".apps[$i].zone"       "$config")
+    monitor=$(jq -r ".apps[$i].monitor // 1" "$config")
+    url=$(jq -r     ".apps[$i].url // \"\""  "$config")
+
+    local label="$app → $zone (monitor $monitor)"
+    [[ -n "$url" ]] && label="$label  [$url]"
+    info "[$((i+1))/$total] $label"
+
+    position_app "$app" "$zone" "$monitor" "$url"
   done
 
   echo "✅  Done."
@@ -215,10 +379,13 @@ cmd_launch() {
 mkdir -p "$WORKSPACES_DIR"
 
 case "${1:-}" in
-  help|--help|-h) usage ;;
-  list)           cmd_list ;;
-  edit)           [[ -n "${2:-}" ]] || die "Usage: workspace edit <name>"; cmd_edit "$2" ;;
-  shortcuts)      cmd_shortcuts ;;
-  "")             usage ;;
-  *)              cmd_launch "$1" ;;
+  help|--help|-h)  usage ;;
+  list)            cmd_list ;;
+  edit)            [[ -n "${2:-}" ]] || die "Usage: workspace edit <n>"; cmd_edit "$2" ;;
+  shortcuts)       cmd_shortcuts ;;
+  schedule)        [[ -n "${2:-}" && -n "${3:-}" ]] || die "Usage: workspace schedule <n> <time>"; cmd_schedule "$2" "$3" ;;
+  unschedule)      [[ -n "${2:-}" ]] || die "Usage: workspace unschedule <n>"; cmd_unschedule "$2" ;;
+  schedules)       cmd_schedules ;;
+  "")              usage ;;
+  *)               cmd_launch "$1" ;;
 esac
