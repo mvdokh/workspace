@@ -117,40 +117,53 @@ function monitorBounds(monitorIdx) {
   };
 }
 
+function shellSingleQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+function doShell(cmd) {
+  var host = Application.currentApplication();
+  host.includeStandardAdditions = true;
+  return host.doShellScript(cmd);
+}
+
+function openApp(appName, url) {
+  var cmd = url
+    ? 'open -a ' + shellSingleQuote(appName) + ' ' + shellSingleQuote(url)
+    : 'open -a ' + shellSingleQuote(appName);
+  doShell(cmd);
+}
+
 function activateAndPosition(appName, zone, monitorIdx, url) {
-  var app = Application(appName);
-  app.includeStandardAdditions = true;
-
-  if (url) {
-    app.activate();
-    app.openLocation(url);
-  } else {
-    app.activate();
-  }
-
-  // wait for app window to appear
+  openApp(appName, url || '');
   var waited = 0;
-  while (waited < 3000) {
+  while (waited < 5000) {
     sleep(200);
     waited += 200;
     try {
-      if (Application('System Events').processes[appName].windows.length > 0) break;
+      if (Application('System Events').processes.byName(appName).windows.length > 0) break;
     } catch(e) {}
   }
 
   var mb  = monitorBounds(monitorIdx);
   var r   = zoneRect(zone, mb.ox, mb.oy, mb.sw, mb.sh);
   var se  = Application('System Events');
-  var proc = se.processes[appName];
-  if (proc.windows.length > 0) {
-    proc.windows[0].position = [r.x, r.y];
-    proc.windows[0].size     = [r.w, r.h];
-  }
+  try {
+    var proc = se.processes.byName(appName);
+    if (proc.windows.length > 0) {
+      var w = proc.windows[0];
+      try {
+        w.position = [r.x, r.y];
+        w.size = [r.w, r.h];
+      } catch (e1) {
+        try {
+          w.bounds = [r.x, r.y, r.x + r.w, r.y + r.h];
+        } catch (e2) {}
+      }
+    }
+  } catch(e) {}
 }
 
-// ── main ─────────────────────────────────────────────────────────────────────
-
-var configPath = Application('bash').doShellScript('echo ' + $.NSProcessInfo.processInfo.environment.objectForKey('WS_CONFIG').js);
 JSEOF
 
   # Re-invoke with config path injected via env
@@ -213,16 +226,29 @@ function waitForWindow(appName, timeoutMs) {
   return false;
 }
 
-function positionApp(appName, zone, monitorIdx, url) {
-  var app = Application(appName);
-  if (url) {
-    app.activate();
-    app.openLocation(url);
-  } else {
-    app.activate();
-  }
+// Single-quote for safe use in /bin/sh -c (doShellScript).
+function shellSingleQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
 
-  waitForWindow(appName, 3000);
+function doShell(cmd) {
+  var host = Application.currentApplication();
+  host.includeStandardAdditions = true;
+  return host.doShellScript(cmd);
+}
+
+// Avoid Application(app).activate / openLocation — many apps return "Message not understood"
+// in JXA. The `open` CLI matches Finder and works for Safari, Slack, Chrome, etc.
+function openApp(appName, url) {
+  var cmd = url
+    ? 'open -a ' + shellSingleQuote(appName) + ' ' + shellSingleQuote(url)
+    : 'open -a ' + shellSingleQuote(appName);
+  doShell(cmd);
+}
+
+function positionApp(appName, zone, monitorIdx, url) {
+  openApp(appName, url || '');
+  waitForWindow(appName, 5000);
 
   var mb = monitorBounds(monitorIdx);
   var r  = zoneRect(zone, mb.ox, mb.oy, mb.sw, mb.sh);
@@ -230,8 +256,15 @@ function positionApp(appName, zone, monitorIdx, url) {
   try {
     var wins = se.processes.byName(appName).windows;
     if (wins.length > 0) {
-      wins[0].position = [r.x, r.y];
-      wins[0].size     = [r.w, r.h];
+      var w = wins[0];
+      try {
+        w.position = [r.x, r.y];
+        w.size = [r.w, r.h];
+      } catch (e1) {
+        try {
+          w.bounds = [r.x, r.y, r.x + r.w, r.y + r.h];
+        } catch (e2) {}
+      }
     }
   } catch(e) {
     // window may not support positioning (e.g. fullscreen)
@@ -248,13 +281,17 @@ var cfg = JSON.parse(raw);
 
 var scripts = cfg.scripts || [];
 for (var s = 0; s < scripts.length; s++) {
-  Application('Terminal'); // ensure shell is available
-  var sh = Application('bash');
-  sh.includeStandardAdditions = true;
-  sh.doShellScript(scripts[s]);
+  doShell(scripts[s]);
 }
 
 // ── launch apps ───────────────────────────────────────────────────────────────
+
+function warnSkip(appName, err) {
+  var msg = 'Skipped "' + appName + '": ' + (err && err.message ? err.message : String(err)) + '\n';
+  $.NSFileHandle.fileHandleWithStandardError.writeData(
+    $.NSString.stringWithUTF8String(msg).dataUsingEncoding($.NSUTF8StringEncoding)
+  );
+}
 
 var apps = cfg.apps || [];
 for (var i = 0; i < apps.length; i++) {
@@ -263,7 +300,11 @@ for (var i = 0; i < apps.length; i++) {
   var zone    = entry.zone;
   var monitor = (entry.monitor || 1) - 1;  // convert to 0-based
   var url     = entry.url || '';
-  positionApp(appName, zone, monitor, url);
+  try {
+    positionApp(appName, zone, monitor, url);
+  } catch (err) {
+    warnSkip(appName, err);
+  }
 }
 
 cfg.name + ' launched (' + apps.length + ' apps)';
@@ -521,23 +562,41 @@ function waitForWindow(appName, timeoutMs) {
   return false;
 }
 
+function shellSingleQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+function doShell(cmd) {
+  var host = Application.currentApplication();
+  host.includeStandardAdditions = true;
+  return host.doShellScript(cmd);
+}
+
+function openApp(appName, url) {
+  var cmd = url
+    ? 'open -a ' + shellSingleQuote(appName) + ' ' + shellSingleQuote(url)
+    : 'open -a ' + shellSingleQuote(appName);
+  doShell(cmd);
+}
+
 function positionApp(appName, zone, monitorIdx, url) {
-  var app = Application(appName);
-  if (url) {
-    app.activate();
-    app.openLocation(url);
-  } else {
-    app.activate();
-  }
-  waitForWindow(appName, 3000);
+  openApp(appName, url || '');
+  waitForWindow(appName, 5000);
   var mb = monitorBounds(monitorIdx);
   var r  = zoneRect(zone, mb.ox, mb.oy, mb.sw, mb.sh);
   var se = Application('System Events');
   try {
     var wins = se.processes.byName(appName).windows;
     if (wins.length > 0) {
-      wins[0].position = [r.x, r.y];
-      wins[0].size     = [r.w, r.h];
+      var w = wins[0];
+      try {
+        w.position = [r.x, r.y];
+        w.size = [r.w, r.h];
+      } catch (e1) {
+        try {
+          w.bounds = [r.x, r.y, r.x + r.w, r.y + r.h];
+        } catch (e2) {}
+      }
     }
   } catch(e) {}
 }
@@ -545,10 +604,21 @@ function positionApp(appName, zone, monitorIdx, url) {
 var configPath = $.NSProcessInfo.processInfo.environment.objectForKey('WS_CONFIG').js;
 var raw = $.NSString.stringWithContentsOfFileEncodingError(configPath, $.NSUTF8StringEncoding, null).js;
 var cfg = JSON.parse(raw);
+function warnSkip(appName, err) {
+  var msg = 'Skipped "' + appName + '": ' + (err && err.message ? err.message : String(err)) + '\n';
+  $.NSFileHandle.fileHandleWithStandardError.writeData(
+    $.NSString.stringWithUTF8String(msg).dataUsingEncoding($.NSUTF8StringEncoding)
+  );
+}
+
 var apps = cfg.apps || [];
 for (var i = 0; i < apps.length; i++) {
   var e = apps[i];
-  positionApp(e.app, e.zone, (e.monitor || 1) - 1, e.url || '');
+  try {
+    positionApp(e.app, e.zone, (e.monitor || 1) - 1, e.url || '');
+  } catch (err) {
+    warnSkip(e.app, err);
+  }
 }
 'done';
 JSEOF

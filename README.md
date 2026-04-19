@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="ascii-art-text.png" alt="WORKSPACE" width="100%" />
+</div>
+
 # workspace
 
 A Mac CLI tool that launches and arranges apps on your screen from a JSON config file. Define your layout once, run it anytime.
@@ -26,9 +30,14 @@ No external dependencies. JSON parsing, window management, and display detection
 
 ```bash
 git clone https://github.com/mvdokh/workspace.git && cd workspace
-sudo cp workspace /usr/local/bin/workspace && sudo chmod +x /usr/local/bin/workspace
+chmod +x workspace                    # so ./workspace runs (repo scripts are not +x until you set it)
+sudo mkdir -p /usr/local/bin
+sudo cp ./workspace /usr/local/bin/workspace
+sudo chmod +x /usr/local/bin/workspace
 mkdir -p ~/.workspaces && cp examples/*.json ~/.workspaces/
 ```
+
+Use `./workspace` (with the `./`) so the shell runs the script in this folder, not another `workspace` on your `PATH`. The `cp` step needs **`sudo`** because `/usr/local/bin` is system-owned. If `cp` says **“is not a directory”**, you usually pointed at the wrong path: copy **the file** `./workspace` to the **directory** `/usr/local/bin/` (see commands above), not into a non-existent or wrong target.
 
 Then go to **System Settings → Privacy & Security → Accessibility** and add your terminal app. Restart your terminal once after granting access.
 
