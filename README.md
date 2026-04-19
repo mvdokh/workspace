@@ -25,7 +25,7 @@ No external dependencies. JSON parsing, window management, and display detection
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/workspace.git && cd workspace
+git clone https://github.com/mvdokh/workspace.git && cd workspace
 sudo cp workspace /usr/local/bin/workspace && sudo chmod +x /usr/local/bin/workspace
 mkdir -p ~/.workspaces && cp examples/*.json ~/.workspaces/
 ```
